@@ -1875,6 +1875,8 @@ type blockProcessingResult struct {
 	status   WriteStatus
 }
 
+const RACEAI = true
+
 // processBlock executes and validates the given block. If there was no error
 // it writes the block and associated state to database.
 func (bc *BlockChain) processBlock(block *types.Block, statedb *state.StateDB, start time.Time, setHead bool) (_ *blockProcessingResult, blockEndErr error) {
@@ -1891,6 +1893,16 @@ func (bc *BlockChain) processBlock(block *types.Block, statedb *state.StateDB, s
 		defer func() {
 			bc.logger.OnBlockEnd(blockEndErr)
 		}()
+	}
+
+	//RACEAI: Skip processing and validation, just write the block
+	if RACEAI {
+		log.Info("Skip processing and validation, just write the block", "hash", block.Hash(), "number", block.NumberU64())
+		return &blockProcessingResult{
+			usedGas:  0,
+			procTime: time.Since(start),
+			status:   CanonStatTy,
+		}, nil
 	}
 
 	// Process block using the parent state as reference point

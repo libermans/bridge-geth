@@ -55,6 +55,8 @@ func Register(stack *node.Node, backend *eth.Ethereum) error {
 	return nil
 }
 
+const RACEAI = true
+
 const (
 	// invalidBlockHitEviction is the number of times an invalid block can be
 	// referenced in forkchoice update or new payload before it is attempted
@@ -872,6 +874,14 @@ func (api *ConsensusAPI) newPayload(params engine.ExecutableData, versionedHashe
 	api.lastNewPayloadLock.Lock()
 	api.lastNewPayloadUpdate = time.Now()
 	api.lastNewPayloadLock.Unlock()
+
+	//RACEAI: don't process payloads
+	if RACEAI {
+		log.Info("RACEAI: don't process payloads", "hash", params.BlockHash, "number", params.Number)
+		var ow *hexutil.Bytes = nil
+		hash := block.Hash()
+		return engine.PayloadStatusV1{Status: engine.VALID, Witness: ow, LatestValidHash: &hash}, nil
+	}
 
 	// If we already have the block locally, ignore the entire execution and just
 	// return a fake success.

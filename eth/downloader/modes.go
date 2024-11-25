@@ -25,6 +25,7 @@ type SyncMode uint32
 const (
 	FullSync SyncMode = iota // Synchronise the entire blockchain history from full blocks
 	SnapSync                 // Download the chain and the state via compact snapshots
+	NonStateSyncMode
 )
 
 func (mode SyncMode) IsValid() bool {
@@ -38,6 +39,8 @@ func (mode SyncMode) String() string {
 		return "full"
 	case SnapSync:
 		return "snap"
+	case NonStateSyncMode:
+		return "full"
 	default:
 		return "unknown"
 	}
@@ -49,6 +52,8 @@ func (mode SyncMode) MarshalText() ([]byte, error) {
 		return []byte("full"), nil
 	case SnapSync:
 		return []byte("snap"), nil
+	case NonStateSyncMode:
+		return []byte("full"), nil
 	default:
 		return nil, fmt.Errorf("unknown sync mode %d", mode)
 	}
@@ -60,8 +65,10 @@ func (mode *SyncMode) UnmarshalText(text []byte) error {
 		*mode = FullSync
 	case "snap":
 		*mode = SnapSync
+	case "skip":
+		*mode = NonStateSyncMode
 	default:
-		return fmt.Errorf(`unknown sync mode %q, want "full" or "snap"`, text)
+		return fmt.Errorf(`unknown sync mode %q, want "full" or "snap" or "non-state"`, text)
 	}
 	return nil
 }

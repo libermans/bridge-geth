@@ -237,3 +237,16 @@ func (ps *peerSet) close() {
 	}
 	ps.closed = true
 }
+
+// Best returns a random peer from the peer set.
+// TODO: Improve peer selection based on criteria like total difficulty
+func (ps *peerSet) Best() *ethPeer {
+	ps.lock.RLock()
+	defer ps.lock.RUnlock()
+
+	// Simple implementation: return first available peer
+	for _, p := range ps.peers {
+		return p
+	}
+	return nil
+}

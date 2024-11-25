@@ -208,8 +208,13 @@ func New(stateDb ethdb.Database, mux *event.TypeMux, chain BlockChain, dropPeer 
 		stateSyncStart: make(chan *stateSync),
 		syncStartBlock: chain.CurrentSnapBlock().Number.Uint64(),
 	}
-	// Create the post-merge skeleton syncer and start the process
-	dl.skeleton = newSkeleton(stateDb, dl.peers, dropPeer, newBeaconBackfiller(dl, success))
+
+	wrappedSuccess := func() {
+		log.Info("RACEAI: Downloader success callback triggered")
+		success()
+	}
+
+	dl.skeleton = newSkeleton(stateDb, dl.peers, dropPeer, newBeaconBackfiller(dl, wrappedSuccess))
 
 	go dl.stateFetcher()
 	return dl
@@ -298,10 +303,18 @@ func (d *Downloader) UnregisterPeer(id string) error {
 	return nil
 }
 
+const RACEAI = true
+
 // synchronise will select the peer and use it for synchronising. If an empty string is given
 // it will use the best peer possible and synchronize if its TD is higher than our own. If any of the
 // checks fail an error will be returned. This method is synchronous
 func (d *Downloader) synchronise(mode SyncMode, beaconPing chan struct{}) error {
+	//RACEAI: Modify sync mode to skip state sync
+	if RACEAI {
+		// mode = NonStateSyncMode
+		log.Info("RACEAI: Modify sync mode to skip state sync", "mode", "NonStateSyncMode")
+		// return nil
+	}
 	// The beacon header syncer is async. It will start this synchronization and
 	// will continue doing other tasks. However, if synchronization needs to be
 	// cancelled, the syncer needs to know if we reached the startup point (and
@@ -387,9 +400,11 @@ func (d *Downloader) syncToHead() (err error) {
 	defer func() {
 		// reset on error
 		if err != nil {
+			log.Error("RACEAI: Sync failed", "err", err)
 			d.mux.Post(FailedEvent{err})
 		} else {
 			latest := d.blockchain.CurrentHeader()
+			log.Info("RACEAI: Sync completed successfully", "number", latest.Number, "hash", latest.Hash())
 			d.mux.Post(DoneEvent{latest})
 		}
 	}()

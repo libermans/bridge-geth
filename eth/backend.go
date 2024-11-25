@@ -23,6 +23,7 @@ import (
 	"math/big"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
@@ -41,6 +42,7 @@ import (
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/eth/gasprice"
 	"github.com/ethereum/go-ethereum/eth/protocols/eth"
+	protocols "github.com/ethereum/go-ethereum/eth/protocols/eth"
 	"github.com/ethereum/go-ethereum/eth/protocols/snap"
 	"github.com/ethereum/go-ethereum/eth/tracers"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -446,4 +448,40 @@ func (s *Ethereum) SyncMode() downloader.SyncMode {
 	}
 	// Nope, we're really full syncing
 	return downloader.FullSync
+}
+
+func (eth *Ethereum) RequestReceiptsForBlock(hash common.Hash) error {
+	// Create response channel
+	resCh := make(chan *protocols.Response)
+
+	// Get a peer that might have the receipts
+	peer := eth.handler.peers.Best()
+	if peer == nil {
+		return fmt.Errorf("no peers available")
+	}
+
+	// Request receipts
+	req, err := peer.RequestReceipts([]common.Hash{hash}, resCh)
+	if err != nil {
+		return err
+	}
+
+	// Handle response
+	go func() {
+		defer req.Close()
+
+		select {
+		case res := <-resCh:
+			if res.Res != nil {
+				receipts := res.Res.(*protocols.ReceiptsResponse)
+				log.Debug("Received receipts for block", "hash", hash, "amount", len(*receipts))
+			}
+			res.Done <- nil
+
+		case <-time.After(5 * time.Second):
+			log.Debug("Receipt request timed out", "hash", hash)
+		}
+	}()
+
+	return nil
 }

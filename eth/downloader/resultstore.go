@@ -76,7 +76,7 @@ func (r *resultStore) SetThrottleThreshold(threshold uint64) uint64 {
 //	throttled - if true, the store is at capacity, this particular header is not prio now
 //	item      - the result to store data into
 //	err       - any error that occurred
-func (r *resultStore) AddFetch(header *types.Header, snapSync bool) (stale, throttled bool, item *fetchResult, err error) {
+func (r *resultStore) AddFetch(header *types.Header, mode SyncMode) (stale, throttled bool, item *fetchResult, err error) {
 	r.lock.Lock()
 	defer r.lock.Unlock()
 
@@ -86,7 +86,8 @@ func (r *resultStore) AddFetch(header *types.Header, snapSync bool) (stale, thro
 		return stale, throttled, item, err
 	}
 	if item == nil {
-		item = newFetchResult(header, snapSync)
+		// TODO: RACEAI: check if this is correct
+		item = newFetchResult(header, mode)
 		r.items[index] = item
 	}
 	return stale, throttled, item, err

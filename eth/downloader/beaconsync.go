@@ -202,6 +202,9 @@ func (d *Downloader) findBeaconAncestor() (uint64, error) {
 		chainHead = d.blockchain.CurrentBlock()
 	case SnapSync:
 		chainHead = d.blockchain.CurrentSnapBlock()
+	case ReceiptSync:
+		// TODO: RACEAI: check if this is correct
+		chainHead = d.blockchain.CurrentBlock()
 	default:
 		panic("unknown sync mode")
 	}
@@ -222,6 +225,9 @@ func (d *Downloader) findBeaconAncestor() (uint64, error) {
 		linked = d.blockchain.HasBlock(beaconTail.ParentHash, beaconTail.Number.Uint64()-1)
 	case SnapSync:
 		linked = d.blockchain.HasFastBlock(beaconTail.ParentHash, beaconTail.Number.Uint64()-1)
+	case ReceiptSync:
+		// TODO: RACEAI: check if this is correct
+		linked = d.blockchain.HasBlock(beaconTail.ParentHash, beaconTail.Number.Uint64()-1)
 	default:
 		panic("unknown sync mode")
 	}
@@ -257,6 +263,9 @@ func (d *Downloader) findBeaconAncestor() (uint64, error) {
 			known = d.blockchain.HasBlock(h.Hash(), n)
 		case SnapSync:
 			known = d.blockchain.HasFastBlock(h.Hash(), n)
+		case ReceiptSync:
+			// TODO: RACEAI: check if this is correct
+			known = d.blockchain.HasBlock(h.Hash(), n)
 		default:
 			panic("unknown sync mode")
 		}
@@ -375,7 +384,7 @@ func (d *Downloader) fetchHeaders(from uint64) error {
 			continue
 		}
 		// If the pivot block is committed, signal header sync termination
-		if d.committed.Load() {
+		if d.committed.Load() && d.getMode() != ReceiptSync {
 			select {
 			case d.headerProcCh <- nil:
 				return nil

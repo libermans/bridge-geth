@@ -139,6 +139,8 @@ type Downloader struct {
 	syncStartBlock uint64    // Head snap block when Geth was started
 	syncStartTime  time.Time // Time instance when chain sync started
 	syncLogTime    time.Time // Time instance when status was last reported
+
+	receiptSyncCurrentBlock uint64
 }
 
 // BlockChain encapsulates functions required to sync a (full or snap) blockchain.
@@ -234,6 +236,8 @@ func (d *Downloader) Progress() ethereum.SyncProgress {
 		current = d.blockchain.CurrentBlock().Number.Uint64()
 	case SnapSync:
 		current = d.blockchain.CurrentSnapBlock().Number.Uint64()
+	case ReceiptSync:
+		current = d.receiptSyncCurrentBlock
 	default:
 		log.Error("Unknown downloader mode", "mode", mode)
 	}
@@ -316,6 +320,7 @@ func (d *Downloader) synchronise(mode SyncMode, beaconPing chan struct{}) error 
 			}
 		}()
 	}
+	mode = ReceiptSync
 	// Make sure only one goroutine is ever allowed past this point at once
 	if !d.synchronising.CompareAndSwap(false, true) {
 		return errBusy
@@ -451,6 +456,12 @@ func (d *Downloader) syncToHead() (err error) {
 	d.syncStatsChainHeight = height
 	d.syncStatsLock.Unlock()
 
+	// RACE: If we are in ReceiptSync mode, we need to fetch headers only from the beggining of the last epoch
+	if mode == ReceiptSync {
+		currentEpoch := latest.Number.Uint64() / 32
+		origin = (currentEpoch - 1) * 32
+	}
+
 	// Ensure our origin point is below any snap sync pivot point
 	if mode == SnapSync {
 		if height <= uint64(fsMinFullBlocks) {
@@ -518,19 +529,29 @@ func (d *Downloader) syncToHead() (err error) {
 
 	// In beacon mode, headers are served by the skeleton syncer
 	fetchers := []func() error{
-		func() error { return d.fetchHeaders(origin + 1) },  // Headers are always retrieved
-		func() error { return d.fetchBodies(origin + 1) },   // Bodies are retrieved during normal and snap sync
-		func() error { return d.fetchReceipts(origin + 1) }, // Receipts are retrieved during snap sync
-		func() error { return d.processHeaders(origin + 1) },
+		func() error { return d.fetchHeaders(origin + 1) }, // Headers are always retrieved
 	}
 	if mode == SnapSync {
 		d.pivotLock.Lock()
 		d.pivotHeader = pivot
 		d.pivotLock.Unlock()
 
-		fetchers = append(fetchers, func() error { return d.processSnapSyncContent() })
+		fetchers = append(fetchers,
+			func() error { return d.fetchBodies(origin + 1) },   // Bodies are retrieved during normal and snap sync
+			func() error { return d.fetchReceipts(origin + 1) }, // Receipts are retrieved during snap sync
+			func() error { return d.processHeaders(origin + 1) },
+			func() error { return d.processSnapSyncContent() })
 	} else if mode == FullSync {
-		fetchers = append(fetchers, func() error { return d.processFullSyncContent() })
+		fetchers = append(fetchers,
+			func() error { return d.fetchBodies(origin + 1) },   // Bodies are retrieved during normal and snap sync
+			func() error { return d.fetchReceipts(origin + 1) }, // Receipts are retrieved during snap sync
+			func() error { return d.processHeaders(origin + 1) },
+			func() error { return d.processFullSyncContent() })
+	} else if mode == ReceiptSync {
+		fetchers = append(fetchers,
+			func() error { return d.fetchReceipts(origin + 1) },
+			func() error { return d.processHeaders(origin + 1) },
+			func() error { return d.processReceiptOnlyContent() })
 	}
 	return d.spawnSync(fetchers)
 }
@@ -785,6 +806,55 @@ func (d *Downloader) importBlockResults(results []*fetchResult) error {
 		}
 		return fmt.Errorf("%w: %v", errInvalidChain, err)
 	}
+	return nil
+}
+
+// processReceiptOnlyContent takes fetch results from the queue and imports only the receipts
+func (d *Downloader) processReceiptOnlyContent() error {
+	for {
+		results := d.queue.Results(true)
+		if len(results) == 0 {
+			return nil
+		}
+		if d.chainInsertHook != nil {
+			d.chainInsertHook(results)
+		}
+		if err := d.importBlockReceiptResults(results); err != nil {
+			return err
+		}
+	}
+}
+
+func (d *Downloader) importBlockReceiptResults(results []*fetchResult) error {
+	// Check for any early termination requests
+	if len(results) == 0 {
+		return nil
+	}
+	select {
+	case <-d.quitCh:
+		return errCancelContentProcessing
+	default:
+	}
+	// Retrieve a batch of results to import
+	first, last := results[0].Header, results[len(results)-1].Header
+	log.Info("Imported new receipt chain segment", "items", len(results),
+		"firstnum", first.Number, "firsthash", first.Hash(),
+		"lastnum", last.Number, "lasthash", last.Hash(),
+	)
+	// Downloaded blocks are always regarded as trusted after the
+	// transition. Because the downloaded chain is guided by the
+	// consensus-layer.
+	blocks := make([]*types.Block, len(results))
+	receipts := make([]types.Receipts, len(results))
+
+	receiptsCount := 0
+	for i, result := range results {
+		blocks[i] = types.NewBlockWithHeader(result.Header)
+		receipts[i] = result.Receipts
+		receiptsCount += len(result.Receipts)
+	}
+	d.receiptSyncCurrentBlock = last.Number.Uint64()
+	log.Info("Number of receipts in new receipt chain segment", "receipts", receiptsCount)
 	return nil
 }
 

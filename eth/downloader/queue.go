@@ -72,17 +72,25 @@ type fetchResult struct {
 	Withdrawals  types.Withdrawals
 }
 
-func newFetchResult(header *types.Header, fastSync bool) *fetchResult {
+func newFetchResult(header *types.Header, mode SyncMode) *fetchResult {
 	item := &fetchResult{
 		Header: header,
 	}
-	if !header.EmptyBody() {
-		item.pending.Store(item.pending.Load() | (1 << bodyType))
-	} else if header.WithdrawalsHash != nil {
-		item.Withdrawals = make(types.Withdrawals, 0)
-	}
-	if fastSync && !header.EmptyReceipts() {
-		item.pending.Store(item.pending.Load() | (1 << receiptType))
+
+	switch mode {
+	case FullSync, SnapSync:
+		if !header.EmptyBody() {
+			item.pending.Store(item.pending.Load() | (1 << bodyType))
+		} else if header.WithdrawalsHash != nil {
+			item.Withdrawals = make(types.Withdrawals, 0)
+		}
+		if mode == SnapSync && !header.EmptyReceipts() {
+			item.pending.Store(item.pending.Load() | (1 << receiptType))
+		}
+	case ReceiptSync:
+		if !header.EmptyReceipts() {
+			item.pending.Store(item.pending.Load() | (1 << receiptType))
+		}
 	}
 	return item
 }
@@ -321,19 +329,25 @@ func (q *queue) Schedule(headers []*types.Header, hashes []common.Hash, from uin
 		// Make sure no duplicate requests are executed
 		// We cannot skip this, even if the block is empty, since this is
 		// what triggers the fetchResult creation.
-		if _, ok := q.blockTaskPool[hash]; ok {
-			log.Warn("Header already scheduled for block fetch", "number", header.Number, "hash", hash)
-		} else {
-			q.blockTaskPool[hash] = header
-			q.blockTaskQueue.Push(header, -int64(header.Number.Uint64()))
+		if q.mode != ReceiptSync {
+			if _, ok := q.blockTaskPool[hash]; ok {
+				log.Warn("Header already scheduled for block fetch", "number", header.Number, "hash", hash)
+			} else {
+				q.blockTaskPool[hash] = header
+				q.blockTaskQueue.Push(header, -int64(header.Number.Uint64()))
+			}
 		}
 		// Queue for receipt retrieval
-		if q.mode == SnapSync && !header.EmptyReceipts() {
-			if _, ok := q.receiptTaskPool[hash]; ok {
-				log.Warn("Header already scheduled for receipt fetch", "number", header.Number, "hash", hash)
+		if q.mode == ReceiptSync || q.mode == SnapSync {
+			if !header.EmptyReceipts() {
+				if _, ok := q.receiptTaskPool[hash]; ok {
+					log.Warn("Header already scheduled for receipt fetch", "number", header.Number, "hash", hash)
+				} else {
+					q.receiptTaskPool[hash] = header
+					q.receiptTaskQueue.Push(header, -int64(header.Number.Uint64()))
+				}
 			} else {
-				q.receiptTaskPool[hash] = header
-				q.receiptTaskQueue.Push(header, -int64(header.Number.Uint64()))
+				q.resultCache.AddFetch(header, q.mode)
 			}
 		}
 		inserts = append(inserts, header)
@@ -371,6 +385,7 @@ func (q *queue) Results(block bool) []*fetchResult {
 		closed = q.closed
 		q.lock.Unlock()
 	}
+
 	// Regardless if closed or not, we can still deliver whatever we have
 	results := q.resultCache.GetCompleted(maxResultsProcess)
 	for _, result := range results {
@@ -523,7 +538,7 @@ func (q *queue) reserveHeaders(p *peerConnection, count int, taskPool map[common
 		// we can ask the resultcache if this header is within the
 		// "prioritized" segment of blocks. If it is not, we need to throttle
 
-		stale, throttle, item, err := q.resultCache.AddFetch(header, q.mode == SnapSync)
+		stale, throttle, item, err := q.resultCache.AddFetch(header, q.mode)
 		if stale {
 			// Don't put back in the task queue, this item has already been
 			// delivered upstream

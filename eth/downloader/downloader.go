@@ -20,6 +20,7 @@ package downloader
 import (
 	"errors"
 	"fmt"
+	"math/big"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state/snapshot"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/eth/bridge"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/eth/protocols/snap"
 	"github.com/ethereum/go-ethereum/ethdb"
@@ -262,7 +264,7 @@ func (d *Downloader) Progress() ethereum.SyncProgress {
 		current = d.blockchain.CurrentBlock().Number.Uint64()
 	case ethconfig.SnapSync:
 		current = d.blockchain.CurrentSnapBlock().Number.Uint64()
-	case ReceiptSync:
+	case ethconfig.ReceiptSync:
 		current = d.receiptSyncCurrentBlock
 	default:
 		log.Error("Unknown downloader mode", "mode", mode)
@@ -484,8 +486,8 @@ func (d *Downloader) syncToHead() (err error) {
 
 	// RACE: If we are in ReceiptSync mode, we need to fetch headers only from the beggining of the last epoch
 	if mode == ReceiptSync {
-		currentEpoch := latest.Number.Uint64() / 32
-		origin = (currentEpoch - 1) * 32
+		origin = latest.Number.Uint64() - 1
+		log.Info("RACE:ReceiptSync mode", "origin", origin)
 	}
 
 	// Ensure our origin point is below any snap sync pivot point
@@ -891,26 +893,47 @@ func (d *Downloader) importBlockReceiptResults(results []*fetchResult) error {
 		return errCancelContentProcessing
 	default:
 	}
-	// Retrieve a batch of results to import
-	first, last := results[0].Header, results[len(results)-1].Header
-	log.Info("Imported new receipt chain segment", "items", len(results),
-		"firstnum", first.Number, "firsthash", first.Hash(),
-		"lastnum", last.Number, "lasthash", last.Hash(),
-	)
-	// Downloaded blocks are always regarded as trusted after the
-	// transition. Because the downloaded chain is guided by the
-	// consensus-layer.
-	blocks := make([]*types.Block, len(results))
-	receipts := make([]types.Receipts, len(results))
 
-	receiptsCount := 0
-	for i, result := range results {
-		blocks[i] = types.NewBlockWithHeader(result.Header)
-		receipts[i] = result.Receipts
-		receiptsCount += len(result.Receipts)
+	// Define the bridge config
+	bridgeConfig := bridge.BridgeConfig{
+		RequestTimeout: 30 * time.Second,
+		Endpoints: []bridge.BridgeEndpointConfig{
+			{
+				URL:     "http://localhost:8081/bridge",
+				Enabled: true,
+			},
+			{
+				URL:     "http://localhost:8082/bridge",
+				Enabled: true,
+			},
+		},
 	}
-	d.receiptSyncCurrentBlock = last.Number.Uint64()
-	log.Info("Number of receipts in new receipt chain segment", "receipts", receiptsCount)
+	// Iterate over each block result
+	for _, result := range results {
+		header := result.Header
+		blockHash := header.Hash()
+		blockNum := header.Number.Uint64()
+
+		// Manually populate receipt fields that would normally be done by DeriveFields
+		for j, receipt := range result.Receipts {
+			// Set block information
+			receipt.BlockHash = blockHash
+			receipt.BlockNumber = new(big.Int).SetUint64(blockNum)
+			receipt.TransactionIndex = uint(j)
+
+			// Set log fields
+			for k := range receipt.Logs {
+				log := receipt.Logs[k]
+				log.BlockNumber = blockNum
+				log.BlockHash = blockHash
+				log.TxIndex = uint(j)
+			}
+		}
+
+		// Process receipts directly in the bridge package
+		bridge.ProcessReceipts(result.Receipts, result.Header, bridgeConfig)
+	}
+
 	return nil
 }
 

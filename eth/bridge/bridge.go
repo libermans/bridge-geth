@@ -38,16 +38,20 @@ type BridgeConfig struct {
 	RequestTimeout time.Duration
 }
 
-// BridgeTransferRequest represents a transfer request to the bridge service
-type BridgeTransferRequest struct {
-	Chain        string `json:"chain"`        // Source chain (always "ethereum" in this case)
-	Contract     string `json:"contract"`     // Token contract address
-	Owner        string `json:"owner"`        // Original token sender
-	Amount       string `json:"amount"`       // Token amount as string
-	ReceiptHash  string `json:"receiptHash"`  // Ethereum receipt hash
-	ReceiptIndex string `json:"receiptIndex"` // Index of the receipt inside the block as string
-	BlockNumber  string `json:"blockNumber"`  // Block number as string
-	ReceiptsRoot string `json:"receiptsRoot"` // Receipts root hash of the block
+// ReceiptData represents a single receipt data to be sent to the bridge
+type ReceiptData struct {
+	Contract     string `json:"contract"`
+	Owner        string `json:"owner"`
+	Amount       string `json:"amount"`
+	ReceiptIndex string `json:"receiptIndex"`
+}
+
+// BlockRequest represents a block with receipts to be sent to the bridge service
+type BlockRequest struct {
+	BlockNumber  string        `json:"blockNumber"`
+	OriginChain  string        `json:"originChain"`
+	ReceiptsRoot string        `json:"receiptsRoot"`
+	Receipts     []ReceiptData `json:"receipts"`
 }
 
 // The USDT contract address on Ethereum mainnet
@@ -55,7 +59,15 @@ var USDTContractAddress = common.HexToAddress("0xdAC17F958D2ee523a2206206994597C
 
 // Known Binance addresses (add more as needed)
 var FilteredAddresses = []common.Address{
+	//common.HexToAddress("0x403962F6323e1F1B8A9238E9C07218f841889765"), // Binance 13
+	//common.HexToAddress("0x28C6c06298d514Db089934071355E5743bf21d60"), // Binance 14
+	//common.HexToAddress("0x21a31Ee1afC51d94C2eFcCAa2092aD1028285549"), // Binance 15
+	//common.HexToAddress("0xDFd5293D8e347dFe59E90eFd55b2956a1343963d"), // Binance 16
+	//common.HexToAddress("0x56Eddb7aa87536c09CCc2793473599fD21A8b17F"), // Binance 17
 	common.HexToAddress("0x9696f59E4d72E237BE84fFD425DCaD154Bf96976"), // Binance 18
+	//common.HexToAddress("0x21a31Ee1afC51d94C2eFcCAa2092aD1028285549"), // Binance Cold Wallet
+	//common.HexToAddress("0xDFd5293D8e347dFe59E90eFd55b2956a1343963d"), // Binance Hot Wallet
+	// Add more known Binance addresses here
 }
 
 // TransferSignature is the event signature for ERC20 Transfer events
@@ -71,17 +83,15 @@ type BlockInfo struct {
 	HasTransfers bool // Indicates if this block has relevant transfers
 }
 
-// sendToBridge sends transaction details to all configured bridge endpoints
-func sendToBridge(ctx context.Context, contract common.Address, from common.Address, amount *big.Int, blockNum uint64, receiptsRoot common.Hash, receiptIndex uint, config BridgeConfig) error {
+// sendBlockToBridge sends block details with filtered receipts to all configured bridge endpoints
+func sendBlockToBridge(ctx context.Context, blockNum uint64, receiptsRoot common.Hash,
+	filteredReceipts []ReceiptData, config BridgeConfig) error {
 	// Prepare request payload using the specified format
-	payload := BridgeTransferRequest{
-		Chain:        "ethereum",
-		Contract:     contract.Hex(),
-		Owner:        from.Hex(),
-		Amount:       amount.String(),
-		ReceiptIndex: fmt.Sprintf("%d", receiptIndex),
+	payload := BlockRequest{
 		BlockNumber:  fmt.Sprintf("%d", blockNum),
+		OriginChain:  "ethereum",
 		ReceiptsRoot: receiptsRoot.Hex(),
+		Receipts:     filteredReceipts,
 	}
 
 	// Marshal the payload to JSON
@@ -91,28 +101,25 @@ func sendToBridge(ctx context.Context, contract common.Address, from common.Addr
 	}
 
 	// Send to each enabled endpoint
-	for i, endpoint := range config.Endpoints {
+	for _, endpoint := range config.Endpoints {
 		if !endpoint.Enabled {
 			continue
 		}
 
-		// Launch a goroutine for each endpoint
-		go func(url string, index int) {
-			err := sendToSingleEndpoint(ctx, url, jsonData, config.RequestTimeout)
-			if err != nil {
-				log.Error("Failed to send transfer to bridge endpoint",
-					"url", url,
-					"index", index,
-					"err", err)
-			} else {
-				log.Info("Successfully sent transfer to bridge endpoint",
-					"url", url,
-					"index", index,
-					"from", from.Hex(),
-					"amount", amount.String(),
-					"receiptshash", receiptsRoot.Hex())
-			}
-		}(endpoint.URL, i)
+		// Process each endpoint sequentially
+		err := sendToSingleEndpoint(ctx, endpoint.URL, jsonData, config.RequestTimeout)
+		if err != nil {
+			log.Error("Failed to send block to bridge endpoint",
+				"url", endpoint.URL,
+				"block", blockNum,
+				"err", err)
+		} else {
+			log.Info("Successfully sent block to bridge endpoint",
+				"url", endpoint.URL,
+				"block", blockNum,
+				"receiptsRoot", receiptsRoot.Hex(),
+				"receiptCount", len(filteredReceipts))
+		}
 	}
 
 	return nil
@@ -212,9 +219,6 @@ func HandleFinalization(finalizedNumber uint64, finalizedHash common.Hash) error
 	// Update last finalized block
 	lastFinalizedBlock = finalizedNumber
 
-	// Cleanup old blocks
-	cleanupOldBlocks(finalizedNumber)
-
 	return nil
 }
 
@@ -269,68 +273,79 @@ func notifyBridgeFinalization(info BlockInfo) error {
 	return nil
 }
 
-// Cleanup old finalized blocks to prevent memory growth
-func cleanupOldBlocks(finalizedNumber uint64) {
-	const keepBlocks = 100 // Reduced from 1000 since we're only storing relevant blocks
-
-	for number := range processedBlocks {
-		if number+keepBlocks < finalizedNumber {
-			delete(processedBlocks, number)
-		}
-	}
-}
-
-// ProcessReceipts processes block receipts and sends notifications for filtered transactions
-func ProcessReceipts(receipts types.Receipts, header *types.Header, config BridgeConfig) {
-	if receipts == nil || len(receipts) == 0 || header == nil {
+// ProcessBlocks processes blocks and sends all blocks to the bridge API
+// If the block contains filtered transfers, those receipts are included in the request
+func ProcessBlocks(receipts types.Receipts, header *types.Header, config BridgeConfig) {
+	if header == nil {
 		return
 	}
 
-	hasRelevantTransfers := false
+	blockNum := header.Number.Uint64()
 	ctx := context.Background()
 
-	// Iterate through block receipts first to check if we have any relevant transfers
-	for _, receipt := range receipts {
-		if receipt == nil || len(receipt.Logs) == 0 || receipt.BlockNumber == nil {
-			continue
-		}
+	log.Info("Processing block",
+		"number", blockNum,
+		"hash", header.Hash().Hex(),
+		"receipts_count", len(receipts))
 
-		for _, logEntry := range receipt.Logs {
-			// Check if this is a USDT transfer log
-			if logEntry.Address != USDTContractAddress || len(logEntry.Topics) < 3 || logEntry.Topics[0] != TransferSignature {
+	// This will hold the filtered receipts
+	var filteredReceipts []ReceiptData
+
+	// If the block has receipts, filter them for relevant transfers
+	if len(receipts) > 0 {
+		// Iterate through block receipts to collect relevant transfers
+		for i, receipt := range receipts {
+			if receipt == nil || len(receipt.Logs) == 0 {
 				continue
 			}
 
-			// Extract transfer details
-			from := common.BytesToAddress(logEntry.Topics[1].Bytes())
-			to := common.BytesToAddress(logEntry.Topics[2].Bytes())
+			for _, logEntry := range receipt.Logs {
+				// Check if this is a USDT transfer log
+				if logEntry.Address != USDTContractAddress || len(logEntry.Topics) < 3 || logEntry.Topics[0] != TransferSignature {
+					continue
+				}
 
-			// Check if the transfer involves a filtered address
-			for _, filteredAddr := range FilteredAddresses {
-				if from == filteredAddr || to == filteredAddr {
-					hasRelevantTransfers = true
-					amount := new(big.Int).SetBytes(logEntry.Data)
+				// Extract transfer details
+				from := common.BytesToAddress(logEntry.Topics[1].Bytes())
+				to := common.BytesToAddress(logEntry.Topics[2].Bytes())
 
-					// Send transfer to bridge
-					if err := sendToBridge(ctx, USDTContractAddress, from, amount, receipt.BlockNumber.Uint64(),
-						header.ReceiptHash, receipt.TransactionIndex, config); err != nil {
-						log.Error("Failed to send filtered USDT transfer to bridge", "err", err)
+				// Check if the transfer involves a filtered address
+				for _, filteredAddr := range FilteredAddresses {
+					if to == filteredAddr {
+						amount := new(big.Int).SetBytes(logEntry.Data)
+
+						// Add this receipt to our filtered list
+						receiptData := ReceiptData{
+							Contract:     USDTContractAddress.Hex(),
+							Owner:        from.Hex(),
+							Amount:       amount.String(),
+							ReceiptIndex: fmt.Sprintf("%d", i), // Use the receipt's index in the receipts array
+						}
+
+						filteredReceipts = append(filteredReceipts, receiptData)
+
+						log.Info("USDT transfer involving filtered address detected",
+							"from", from.Hex(),
+							"to", to.Hex(),
+							"amount", amount.String(),
+							"block", blockNum,
+							"index", i)
+						break
 					}
-
-					log.Info("USDT transfer involving filtered address detected",
-						"from", from.Hex(),
-						"to", to.Hex(),
-						"amount", amount.String(),
-						"block", receipt.BlockNumber.Uint64(),
-						"index", receipt.TransactionIndex)
-					break
 				}
 			}
 		}
 	}
 
-	// Only store block info if we found relevant transfers
-	if hasRelevantTransfers {
-		StoreBlockInfo(header.Number.Uint64(), header.Hash(), header.ReceiptHash, config)
+	log.Info("Block processing complete",
+		"number", blockNum,
+		"filtered_receipts", len(filteredReceipts))
+
+	// Send block to bridge (even if no relevant receipts were found)
+	if err := sendBlockToBridge(ctx, blockNum, header.ReceiptHash, filteredReceipts, config); err != nil {
+		log.Error("Failed to send block to bridge",
+			"block", blockNum,
+			"receiptsRoot", header.ReceiptHash.Hex(),
+			"err", err)
 	}
 }

@@ -20,7 +20,6 @@ package downloader
 import (
 	"errors"
 	"fmt"
-	"math/big"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -348,7 +347,7 @@ func (d *Downloader) synchronise(mode SyncMode, beaconPing chan struct{}) error 
 			}
 		}()
 	}
-	mode = ReceiptSync
+	mode = ethconfig.ReceiptSync
 	// Make sure only one goroutine is ever allowed past this point at once
 	if !d.synchronising.CompareAndSwap(false, true) {
 		return errBusy
@@ -485,7 +484,7 @@ func (d *Downloader) syncToHead() (err error) {
 	d.syncStatsLock.Unlock()
 
 	// RACE: If we are in ReceiptSync mode, we need to fetch headers only from the beggining of the last epoch
-	if mode == ReceiptSync {
+	if mode == ethconfig.ReceiptSync {
 		origin = latest.Number.Uint64() - 1
 		log.Info("RACE:ReceiptSync mode", "origin", origin)
 	}
@@ -899,39 +898,20 @@ func (d *Downloader) importBlockReceiptResults(results []*fetchResult) error {
 		RequestTimeout: 30 * time.Second,
 		Endpoints: []bridge.BridgeEndpointConfig{
 			{
-				URL:     "http://localhost:8081/bridge",
+				URL:     "http://localhost:9010/v1/bridge/block",
 				Enabled: true,
 			},
 			{
-				URL:     "http://localhost:8082/bridge",
+				URL:     "http://localhost:9020/v1/bridge/block",
 				Enabled: true,
 			},
 		},
 	}
-	// Iterate over each block result
+
+	// Iterate over each block result and send to bridge
 	for _, result := range results {
-		header := result.Header
-		blockHash := header.Hash()
-		blockNum := header.Number.Uint64()
-
-		// Manually populate receipt fields that would normally be done by DeriveFields
-		for j, receipt := range result.Receipts {
-			// Set block information
-			receipt.BlockHash = blockHash
-			receipt.BlockNumber = new(big.Int).SetUint64(blockNum)
-			receipt.TransactionIndex = uint(j)
-
-			// Set log fields
-			for k := range receipt.Logs {
-				log := receipt.Logs[k]
-				log.BlockNumber = blockNum
-				log.BlockHash = blockHash
-				log.TxIndex = uint(j)
-			}
-		}
-
-		// Process receipts directly in the bridge package
-		bridge.ProcessReceipts(result.Receipts, result.Header, bridgeConfig)
+		// Process blocks and receipts directly using the bridge package
+		bridge.ProcessBlocks(result.Receipts, result.Header, bridgeConfig)
 	}
 
 	return nil

@@ -314,19 +314,6 @@ func (api *ConsensusAPI) forkchoiceUpdated(update engine.ForkchoiceStateV1, payl
 	defer api.forkchoiceLock.Unlock()
 
 	log.Trace("Engine API request received", "method", "ForkchoiceUpdated", "head", update.HeadBlockHash, "finalized", update.FinalizedBlockHash, "safe", update.SafeBlockHash)
-	// Special handling for ReceiptSync mode - focus only on finalized blocks
-	if api.eth.SyncMode() == ethconfig.ReceiptSync || api.eth.SyncMode() == ethconfig.FullSync {
-		if update.FinalizedBlockHash != (common.Hash{}) {
-			finalized := api.remoteBlocks.get(update.FinalizedBlockHash)
-			if finalized != nil {
-				log.Info("RACE: Processing forkchoice update in ReceiptSync mode with finalized block",
-					"head", update.HeadBlockHash,
-					"finalized", update.FinalizedBlockHash)
-				bridge.HandleFinalization(finalized.Number.Uint64(), finalized.Hash())
-				return engine.STATUS_SYNCING, nil
-			}
-		}
-	}
 
 	if update.HeadBlockHash == (common.Hash{}) {
 		log.Warn("Forkchoice requested update to zero hash")
@@ -369,6 +356,15 @@ func (api *ConsensusAPI) forkchoiceUpdated(update engine.ForkchoiceStateV1, payl
 			}
 		}
 		log.Info("Forkchoice requested sync to new head", context...)
+		// Special handling for ReceiptSync mode - focus only on finalized blocks
+		if api.eth.SyncMode() == ethconfig.ReceiptSync || api.eth.SyncMode() == ethconfig.FullSync {
+			if finalized != nil {
+				log.Info("RACE: Processing forkchoice update in ReceiptSync mode with finalized block",
+					"head", update.HeadBlockHash,
+					"finalized", update.FinalizedBlockHash)
+				bridge.HandleFinalization(finalized.Number.Uint64(), finalized.Hash())
+			}
+		}
 		if err := api.eth.Downloader().BeaconSync(api.eth.SyncMode(), header, finalized); err != nil {
 			return engine.STATUS_SYNCING, err
 		}
@@ -1046,12 +1042,12 @@ func (api *ConsensusAPI) delayPayloadImport(block *types.Block) engine.PayloadSt
 	// some strain from the forkchoice update.
 	// For ReceiptSync, use BeaconSync to force restart sync cycle
 	log.Warn("RACE: delayPayloadImport - BeaconSync", "mode", api.eth.SyncMode())
-	err := api.eth.Downloader().BeaconSync(api.eth.SyncMode(), block.Header(), nil)
-	//err := api.eth.Downloader().BeaconExtend(api.eth.SyncMode(), block.Header())
+	//err := api.eth.Downloader().BeaconSync(api.eth.SyncMode(), block.Header(), nil)
+	err := api.eth.Downloader().BeaconExtend(api.eth.SyncMode(), block.Header())
 	if err == nil {
 		// Special handling for ReceiptSync mode - always mark blocks as valid
 		// This enables proper finality when we're only concerned with receipts
-		if api.eth.SyncMode() == downloader.ReceiptSync || api.eth.SyncMode() == downloader.FullSync {
+		if api.eth.SyncMode() == ethconfig.ReceiptSync || api.eth.SyncMode() == ethconfig.FullSync {
 			log.Info("RACE-BAD: delayPayloadImport -Marking delayed payload as VALID in ReceiptSync mode", "number", block.NumberU64(), "hash", block.Hash())
 			hash := block.Hash()
 			return engine.PayloadStatusV1{Status: engine.VALID, LatestValidHash: &hash}

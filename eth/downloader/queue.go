@@ -91,6 +91,12 @@ func newFetchResult(header *types.Header, mode SyncMode) *fetchResult {
 	case ethconfig.ReceiptSync:
 		if !header.EmptyReceipts() {
 			item.pending.Store(item.pending.Load() | (1 << receiptType))
+		} else {
+			if item.AllDone() {
+				log.Info("Fetch result marked as done as it has no receipts", "header", item.Header.Number.Uint64(), "AllDone", item.AllDone())
+			} else {
+				log.Info("Fetch result has no receipts but somehow is not done", "header", item.Header.Number.Uint64(), "AllDone", item.AllDone())
+			}
 		}
 	}
 	return item
@@ -121,6 +127,7 @@ func (f *fetchResult) AllDone() bool {
 func (f *fetchResult) SetReceiptsDone() {
 	if v := f.pending.Load(); (v & (1 << receiptType)) != 0 {
 		f.pending.Add(-2)
+		log.Info("Receipts marked as done", "header", f.Header.Number.Uint64(), "AllDone", f.AllDone())
 	}
 }
 
@@ -301,11 +308,17 @@ func (q *queue) Schedule(headers []*types.Header, hashes []common.Hash, from uin
 // Results can be called concurrently with Deliver and Schedule,
 // but assumes that there are not two simultaneous callers to Results
 func (q *queue) Results(block bool) []*fetchResult {
+	log.Info("Results called", "block", block)
 	// Abort early if there are no items and non-blocking requested
 	if !block && !q.resultCache.HasCompletedItems() {
 		return nil
 	}
 	closed := false
+
+	// Create a ticker that fires every 20 seconds
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+
 	for !closed && !q.resultCache.HasCompletedItems() {
 		// In order to wait on 'active', we need to obtain the lock.
 		// That may take a while, if someone is delivering at the same
@@ -323,6 +336,13 @@ func (q *queue) Results(block bool) []*fetchResult {
 		q.active.Wait()
 		closed = q.closed
 		q.lock.Unlock()
+
+		select {
+		case <-ticker.C:
+			log.Warn("Still waiting for completed items in the result cache", "HasCompletedItems", q.resultCache.HasCompletedItems())
+		default:
+			// Do nothing if the ticker hasn't fired
+		}
 	}
 
 	// Regardless if closed or not, we can still deliver whatever we have
@@ -348,6 +368,11 @@ func (q *queue) Results(block bool) []*fetchResult {
 	throttleThreshold := uint64((common.StorageSize(blockCacheMemory) + q.resultSize - 1) / q.resultSize)
 	throttleThreshold = q.resultCache.SetThrottleThreshold(throttleThreshold)
 
+	if len(results) == 0 {
+		log.Info("Results is empty before channel wake", "closed", closed, "results", len(results))
+	} else {
+		log.Info("Results is not empty before channel wake", "closed", closed, "results", len(results))
+	}
 	// With results removed from the cache, wake throttled fetchers
 	for _, ch := range []chan bool{q.blockWakeCh, q.receiptWakeCh} {
 		select {
@@ -362,6 +387,11 @@ func (q *queue) Results(block bool) []*fetchResult {
 		info := q.Stats()
 		info = append(info, "throttle", throttleThreshold)
 		log.Debug("Downloader queue stats", info...)
+	}
+	if len(results) > 0 {
+		log.Info("Results is not empty", "closed", closed, "results", len(results))
+	} else {
+		log.Info("Results is empty", "closed", closed)
 	}
 	return results
 }

@@ -961,6 +961,24 @@ Please note that --` + MetricsHTTPFlag.Name + ` must be set to start the server.
 		Value:    metrics.DefaultConfig.InfluxDBOrganization,
 		Category: flags.MetricsCategory,
 	}
+
+	// Bridge settings
+	BridgeEndpointsFlag = &cli.StringSliceFlag{
+		Name:     "bridge.endpoints",
+		Usage:    "Comma separated list of bridge API endpoints",
+		Category: flags.EthCategory,
+	}
+	BridgeTimeoutFlag = &cli.DurationFlag{
+		Name:     "bridge.timeout",
+		Usage:    "Timeout for bridge API requests",
+		Value:    30 * time.Second,
+		Category: flags.EthCategory,
+	}
+	BridgeContractFlag = &cli.StringFlag{
+		Name:     "bridge.contract",
+		Usage:    "Bridge contract address",
+		Category: flags.EthCategory,
+	}
 )
 
 var (
@@ -1569,6 +1587,19 @@ func setRequiredBlocks(ctx *cli.Context, cfg *ethconfig.Config) {
 	}
 }
 
+func setBridge(ctx *cli.Context, cfg *ethconfig.Config) {
+	// Bridge configuration
+	if ctx.IsSet(BridgeEndpointsFlag.Name) {
+		cfg.BridgeEndpoints = ctx.StringSlice(BridgeEndpointsFlag.Name)
+	}
+	if ctx.IsSet(BridgeTimeoutFlag.Name) {
+		cfg.BridgeTimeout = ctx.Duration(BridgeTimeoutFlag.Name)
+	}
+	if ctx.IsSet(BridgeContractFlag.Name) {
+		cfg.BridgeContract = common.HexToAddress(ctx.String(BridgeContractFlag.Name))
+	}
+}
+
 // SetEthConfig applies eth-related command line flags to the config.
 func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	// Avoid conflicting network flags, don't allow network id override on preset networks
@@ -1583,6 +1614,7 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	setMiner(ctx, &cfg.Miner)
 	setRequiredBlocks(ctx, cfg)
 	setLes(ctx, cfg)
+	setBridge(ctx, cfg)
 
 	// Cap the cache allowance and tune the garbage collector
 	mem, err := gopsutil.VirtualMemory()

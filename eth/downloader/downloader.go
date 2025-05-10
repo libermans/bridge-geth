@@ -893,25 +893,12 @@ func (d *Downloader) importBlockReceiptResults(results []*fetchResult) error {
 	default:
 	}
 
-	// Define the bridge config
-	bridgeConfig := bridge.BridgeConfig{
-		RequestTimeout: 30 * time.Second,
-		Endpoints: []bridge.BridgeEndpointConfig{
-			{
-				URL:     "http://localhost:9010/v1/bridge/block",
-				Enabled: true,
-			},
-			{
-				URL:     "http://localhost:9020/v1/bridge/block",
-				Enabled: true,
-			},
-		},
-	}
-
 	// Iterate over each block result and send to bridge
 	for _, result := range results {
 		// Process blocks and receipts directly using the bridge package
-		bridge.ProcessBlocks(result.Receipts, result.Header, bridgeConfig)
+		if err := bridge.ProcessBlocks(result.Receipts, result.Header); err != nil {
+			log.Error("Failed to process block for bridge", "number", result.Header.Number, "err", err)
+		}
 	}
 
 	return nil

@@ -7,35 +7,34 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
-	"sort"
 	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
-
+	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/log"
 )
 
 // Add these variables at the package level
 var (
 	// New variables for block tracking
-	processedBlocks      = make(map[uint64]*BlockInfo) // map[blockNumber]*BlockInfo
-	processedBlocksMu    sync.RWMutex
-	lastFinalizedBlock   uint64
-	lastFinalizedBlockMu sync.RWMutex
+	processedBlocks   = make(map[uint64]*BlockInfo) // map[blockNumber]*BlockInfo
+	processedBlocksMu sync.RWMutex
+
+	config     *ethconfig.Config
+	configOnce sync.Once
 )
 
-// Configuration types
-type BridgeEndpointConfig struct {
-	URL     string
-	Enabled bool
+func SetConfig(incomingConfig *ethconfig.Config) {
+	configOnce.Do(func() {
+		config = incomingConfig
+	})
 }
 
-type BridgeConfig struct {
-	Endpoints      []BridgeEndpointConfig
-	RequestTimeout time.Duration
+func GetConfig() *ethconfig.Config {
+	return config
 }
 
 // ReceiptData represents a single receipt data to be sent to the bridge
@@ -57,19 +56,6 @@ type BlockRequest struct {
 // The USDT contract address on Ethereum mainnet
 var USDTContractAddress = common.HexToAddress("0xdAC17F958D2ee523a2206206994597C13D831ec7")
 
-// Known Binance addresses (add more as needed)
-var FilteredAddresses = []common.Address{
-	//common.HexToAddress("0x403962F6323e1F1B8A9238E9C07218f841889765"), // Binance 13
-	//common.HexToAddress("0x28C6c06298d514Db089934071355E5743bf21d60"), // Binance 14
-	//common.HexToAddress("0x21a31Ee1afC51d94C2eFcCAa2092aD1028285549"), // Binance 15
-	//common.HexToAddress("0xDFd5293D8e347dFe59E90eFd55b2956a1343963d"), // Binance 16
-	//common.HexToAddress("0x56Eddb7aa87536c09CCc2793473599fD21A8b17F"), // Binance 17
-	common.HexToAddress("0x9696f59E4d72E237BE84fFD425DCaD154Bf96976"), // Binance 18
-	//common.HexToAddress("0x21a31Ee1afC51d94C2eFcCAa2092aD1028285549"), // Binance Cold Wallet
-	//common.HexToAddress("0xDFd5293D8e347dFe59E90eFd55b2956a1343963d"), // Binance Hot Wallet
-	// Add more known Binance addresses here
-}
-
 // TransferSignature is the event signature for ERC20 Transfer events
 var TransferSignature = crypto.Keccak256Hash([]byte("Transfer(address,address,uint256)"))
 
@@ -79,13 +65,17 @@ type BlockInfo struct {
 	Hash         common.Hash
 	ReceiptsRoot common.Hash
 	Finalized    bool
-	Config       BridgeConfig
 	HasTransfers bool // Indicates if this block has relevant transfers
 }
 
 // sendBlockToBridge sends block details with filtered receipts to all configured bridge endpoints
 func sendBlockToBridge(ctx context.Context, blockNum uint64, receiptsRoot common.Hash,
-	filteredReceipts []ReceiptData, config BridgeConfig) error {
+	filteredReceipts []ReceiptData) error {
+	config := GetConfig()
+	if config == nil || len(config.BridgeEndpoints) == 0 {
+		return nil
+	}
+
 	// Prepare request payload using the specified format
 	payload := BlockRequest{
 		BlockNumber:  fmt.Sprintf("%d", blockNum),
@@ -100,22 +90,18 @@ func sendBlockToBridge(ctx context.Context, blockNum uint64, receiptsRoot common
 		return fmt.Errorf("failed to marshal JSON payload: %w", err)
 	}
 
-	// Send to each enabled endpoint
-	for _, endpoint := range config.Endpoints {
-		if !endpoint.Enabled {
-			continue
-		}
-
+	// Send to each endpoint
+	for _, endpoint := range config.BridgeEndpoints {
 		// Process each endpoint sequentially
-		err := sendToSingleEndpoint(ctx, endpoint.URL, jsonData, config.RequestTimeout)
+		err := sendToSingleEndpoint(ctx, endpoint, jsonData, config.BridgeTimeout)
 		if err != nil {
 			log.Error("Failed to send block to bridge endpoint",
-				"url", endpoint.URL,
+				"url", endpoint,
 				"block", blockNum,
 				"err", err)
 		} else {
 			log.Info("Successfully sent block to bridge endpoint",
-				"url", endpoint.URL,
+				"url", endpoint,
 				"block", blockNum,
 				"receiptsRoot", receiptsRoot.Hex(),
 				"receiptCount", len(filteredReceipts))
@@ -135,7 +121,7 @@ func sendToSingleEndpoint(ctx context.Context, url string, jsonData []byte, time
 	req.Header.Set("Content-Type", "application/json")
 
 	// Execute the request
-	client := &http.Client{}
+	client := &http.Client{Timeout: timeout}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to send HTTP request: %w", err)
@@ -151,7 +137,7 @@ func sendToSingleEndpoint(ctx context.Context, url string, jsonData []byte, time
 }
 
 // Store block information for later finalization
-func StoreBlockInfo(number uint64, hash, receiptsRoot common.Hash, config BridgeConfig) {
+func StoreBlockInfo(number uint64, hash, receiptsRoot common.Hash) {
 	processedBlocksMu.Lock()
 	defer processedBlocksMu.Unlock()
 
@@ -160,7 +146,6 @@ func StoreBlockInfo(number uint64, hash, receiptsRoot common.Hash, config Bridge
 		Hash:         hash,
 		ReceiptsRoot: receiptsRoot,
 		Finalized:    false,
-		Config:       config,
 		HasTransfers: false,
 	}
 	log.Debug("Stored block info for future finalization",
@@ -169,115 +154,17 @@ func StoreBlockInfo(number uint64, hash, receiptsRoot common.Hash, config Bridge
 		"receiptsRoot", receiptsRoot.Hex())
 }
 
-// Handle block finalization
-func HandleFinalization(finalizedNumber uint64, finalizedHash common.Hash) error {
-	processedBlocksMu.Lock()
-	defer processedBlocksMu.Unlock()
-
-	lastFinalizedBlockMu.Lock()
-	defer lastFinalizedBlockMu.Unlock()
-
-	// Only process if this is a new finalization
-	if finalizedNumber <= lastFinalizedBlock {
+// ProcessBlocks processes blocks and sends all blocks to the bridge API
+// If the block contains filtered transfers, those receipts are included in the request
+func ProcessBlocks(receipts types.Receipts, header *types.Header) error {
+	config := GetConfig()
+	if config == nil || len(config.BridgeEndpoints) == 0 {
+		// No endpoints configured, skip processing
 		return nil
 	}
 
-	log.Info("Processing block finalization",
-		"finalizedNumber", finalizedNumber,
-		"finalizedHash", finalizedHash.Hex(),
-		"previousFinalized", lastFinalizedBlock)
-
-	// Collect blocks to be finalized
-	var blocksToFinalize []BlockInfo
-	for number, info := range processedBlocks {
-		if number <= finalizedNumber && !info.Finalized {
-			// Deep copy the block info
-			blocksToFinalize = append(blocksToFinalize, *info)
-			info.Finalized = true
-		}
-	}
-
-	// Sort blocks by number for deterministic processing
-	sort.Slice(blocksToFinalize, func(i, j int) bool {
-		return blocksToFinalize[i].Number < blocksToFinalize[j].Number
-	})
-
-	// Notify bridge API about finalized blocks
-	for _, info := range blocksToFinalize {
-		if err := notifyBridgeFinalization(info); err != nil {
-			log.Error("Failed to notify bridge about finalized block",
-				"number", info.Number,
-				"hash", info.Hash.Hex(),
-				"err", err)
-			continue
-		}
-		log.Info("Notified bridge about finalized block",
-			"number", info.Number,
-			"hash", info.Hash.Hex())
-	}
-
-	// Update last finalized block
-	lastFinalizedBlock = finalizedNumber
-
-	return nil
-}
-
-// Notify bridge API about finalized block
-func notifyBridgeFinalization(info BlockInfo) error {
-	// Prepare request payload
-	payload := struct {
-		BlockNumber  string `json:"blockNumber"`
-		ReceiptsRoot string `json:"receiptsRoot"`
-	}{
-		BlockNumber:  fmt.Sprintf("%d", info.Number),
-		ReceiptsRoot: info.ReceiptsRoot.Hex(),
-	}
-
-	// Marshal payload
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("failed to marshal finalization payload: %w", err)
-	}
-
-	// Send to each enabled endpoint
-	for _, endpoint := range info.Config.Endpoints {
-		if !endpoint.Enabled {
-			continue
-		}
-
-		// Create finalization request
-		req, err := http.NewRequest("PATCH", endpoint.URL, bytes.NewBuffer(jsonData))
-		if err != nil {
-			log.Error("Failed to create finalization request", "err", err)
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
-
-		// Send request
-		client := &http.Client{Timeout: info.Config.RequestTimeout}
-		resp, err := client.Do(req)
-		if err != nil {
-			log.Error("Failed to send finalization request", "err", err)
-			continue
-		}
-		resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			log.Error("Bridge API returned non-200 status for finalization",
-				"status", resp.StatusCode,
-				"block", info.Number)
-			continue
-		}
-	}
-
-	return nil
-}
-
-// ProcessBlocks processes blocks and sends all blocks to the bridge API
-// If the block contains filtered transfers, those receipts are included in the request
-func ProcessBlocks(receipts types.Receipts, header *types.Header, config BridgeConfig) {
 	if header == nil {
-		return
+		return nil
 	}
 
 	blockNum := header.Number.Uint64()
@@ -309,30 +196,28 @@ func ProcessBlocks(receipts types.Receipts, header *types.Header, config BridgeC
 				from := common.BytesToAddress(logEntry.Topics[1].Bytes())
 				to := common.BytesToAddress(logEntry.Topics[2].Bytes())
 
-				// Check if the transfer involves a filtered address
-				for _, filteredAddr := range FilteredAddresses {
-					if to == filteredAddr {
-						amount := new(big.Int).SetBytes(logEntry.Data)
+				if to == config.BridgeContract {
+					amount := new(big.Int).SetBytes(logEntry.Data)
 
-						// Add this receipt to our filtered list
-						receiptData := ReceiptData{
-							Contract:     USDTContractAddress.Hex(),
-							Owner:        from.Hex(),
-							Amount:       amount.String(),
-							ReceiptIndex: fmt.Sprintf("%d", i), // Use the receipt's index in the receipts array
-						}
-
-						filteredReceipts = append(filteredReceipts, receiptData)
-
-						log.Info("USDT transfer involving filtered address detected",
-							"from", from.Hex(),
-							"to", to.Hex(),
-							"amount", amount.String(),
-							"block", blockNum,
-							"index", i)
-						break
+					// Add this receipt to our filtered list
+					receiptData := ReceiptData{
+						Contract:     USDTContractAddress.Hex(),
+						Owner:        from.Hex(),
+						Amount:       amount.String(),
+						ReceiptIndex: fmt.Sprintf("%d", i), // Use the receipt's index in the receipts array
 					}
+
+					filteredReceipts = append(filteredReceipts, receiptData)
+
+					log.Info("USDT transfer involving filtered address detected",
+						"from", from.Hex(),
+						"to", to.Hex(),
+						"amount", amount.String(),
+						"block", blockNum,
+						"index", i)
+					break
 				}
+
 			}
 		}
 	}
@@ -342,10 +227,9 @@ func ProcessBlocks(receipts types.Receipts, header *types.Header, config BridgeC
 		"filtered_receipts", len(filteredReceipts))
 
 	// Send block to bridge (even if no relevant receipts were found)
-	if err := sendBlockToBridge(ctx, blockNum, header.ReceiptHash, filteredReceipts, config); err != nil {
-		log.Error("Failed to send block to bridge",
-			"block", blockNum,
-			"receiptsRoot", header.ReceiptHash.Hex(),
-			"err", err)
+	if err := sendBlockToBridge(ctx, blockNum, header.ReceiptHash, filteredReceipts); err != nil {
+		return err
 	}
+
+	return nil
 }

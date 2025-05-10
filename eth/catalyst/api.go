@@ -33,7 +33,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/eth"
-	"github.com/ethereum/go-ethereum/eth/bridge"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/internal/version"
 	"github.com/ethereum/go-ethereum/log"
@@ -356,13 +355,11 @@ func (api *ConsensusAPI) forkchoiceUpdated(update engine.ForkchoiceStateV1, payl
 			}
 		}
 		log.Info("Forkchoice requested sync to new head", context...)
-		// Special handling for ReceiptSync mode - focus only on finalized blocks
 		if api.eth.SyncMode() == ethconfig.ReceiptSync || api.eth.SyncMode() == ethconfig.FullSync {
 			if finalized != nil {
 				log.Info("RACE: Processing forkchoice update in ReceiptSync mode with finalized block",
 					"head", update.HeadBlockHash,
 					"finalized", update.FinalizedBlockHash)
-				bridge.HandleFinalization(finalized.Number.Uint64(), finalized.Hash())
 			}
 		}
 		if err := api.eth.Downloader().BeaconSync(api.eth.SyncMode(), header, finalized); err != nil {

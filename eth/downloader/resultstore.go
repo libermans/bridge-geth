@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/log"
 )
 
 // resultStore implements a structure for maintaining fetchResults, tracking their
@@ -89,6 +90,9 @@ func (r *resultStore) AddFetch(header *types.Header, mode SyncMode) (stale, thro
 		// TODO: RACEAI: check if this is correct
 		item = newFetchResult(header, mode)
 		r.items[index] = item
+		log.Info("Adding new fetch result", "header", header.Number.Uint64(), "mode", mode, "index", index, "len(r.items)", len(r.items))
+	} else {
+		log.Info("Fetch result already exists", "header", header.Number.Uint64(), "mode", mode, "index", index, "len(r.items)", len(r.items))
 	}
 	return stale, throttled, item, err
 }
@@ -110,6 +114,9 @@ func (r *resultStore) GetDeliverySlot(headerNumber uint64) (*fetchResult, bool, 
 func (r *resultStore) getFetchResult(headerNumber uint64) (item *fetchResult, index int, stale, throttle bool, err error) {
 	index = int(int64(headerNumber) - int64(r.resultOffset))
 	throttle = index >= int(r.throttleThreshold)
+	if throttle {
+		log.Info("Throttling fetch result", "header", headerNumber, "index", index, "threshold", r.throttleThreshold, "headerNumber", headerNumber, "resultOffset", r.resultOffset)
+	}
 	stale = index < 0
 
 	if index >= len(r.items) {

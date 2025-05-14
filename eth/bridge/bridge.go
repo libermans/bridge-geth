@@ -30,6 +30,18 @@ var (
 func SetConfig(incomingConfig *ethconfig.Config) {
 	configOnce.Do(func() {
 		config = incomingConfig
+		// Add logging to verify the bridge contract address
+		if len(config.BridgeEndpoints) > 0 {
+			log.Info("Bridge configuration initialized",
+				"endpoints", config.BridgeEndpoints,
+				"timeout", config.BridgeTimeout)
+
+			if config.BridgeContract != (common.Address{}) {
+				log.Info("Bridge contract set", "address", config.BridgeContract.Hex())
+			} else {
+				log.Warn("Bridge contract address not set or empty")
+			}
+		}
 	})
 }
 

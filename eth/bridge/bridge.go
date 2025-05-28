@@ -88,20 +88,23 @@ func recoverPublicKey(signer types.Signer, tx *types.Transaction) (string, error
 	// Get the signature values
 	v, r, s := tx.RawSignatureValues()
 
-	// Convert to bytes for Ecrecover
+	// Convert to bytes for SigToPub
 	sig := make([]byte, 65)
 	r.FillBytes(sig[0:32])
 	s.FillBytes(sig[32:64])
 	sig[64] = byte(v.Uint64() - 27) // Convert to 0/1
 
-	// Recover the public key
-	pub, err := crypto.Ecrecover(sighash[:], sig)
+	// Recover the public key using SigToPub
+	pub, err := crypto.SigToPub(sighash[:], sig)
 	if err != nil {
 		return "", fmt.Errorf("failed to recover public key: %w", err)
 	}
 
-	// Return the public key as a hex string
-	return common.Bytes2Hex(pub), nil
+	// Convert the public key to compressed format
+	compressedPub := crypto.CompressPubkey(pub)
+
+	// Return the compressed public key as a hex string
+	return common.Bytes2Hex(compressedPub), nil
 }
 
 // sendBlockToBridge sends block details with filtered receipts to all configured bridge endpoints

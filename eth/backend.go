@@ -112,11 +112,6 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		return nil, fmt.Errorf("invalid sync mode %d", config.SyncMode)
 	}
 
-	// Initialize bridge configuration if endpoints are provided
-	if len(config.BridgeEndpoints) > 0 {
-		bridge.SetConfig(config)
-	}
-
 	// Ensure configuration values are compatible and sane
 	if !config.HistoryMode.IsValid() {
 		return nil, fmt.Errorf("invalid history mode %d", config.HistoryMode)
@@ -157,6 +152,12 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Initialize bridge configuration if endpoints are provided
+	if len(config.BridgeEndpoints) > 0 {
+		bridge.SetConfig(config, chainConfig)
+	}
+
 	engine, err := ethconfig.CreateConsensusEngine(chainConfig, chainDb)
 	if err != nil {
 		return nil, err

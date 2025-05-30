@@ -281,6 +281,7 @@ func ProcessBlocks(receipts types.Receipts, header *types.Header, txMap map[comm
 				filteredReceipts = append(filteredReceipts, receiptData)
 
 				log.Info("Bridge: USDT transfer involving filtered address detected",
+					"publicKey", pubKey,
 					"from", from.Hex(),
 					"to", to.Hex(),
 					"amount", amount.String(),

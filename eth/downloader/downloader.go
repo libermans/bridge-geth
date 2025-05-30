@@ -895,9 +895,18 @@ func (d *Downloader) importBlockReceiptResults(results []*fetchResult) error {
 
 	// Iterate over each block result and send to bridge
 	for _, result := range results {
+		// Create a map of transaction hashes to their full transaction data
+		txMap := make(map[common.Hash]*types.Transaction)
+		for _, tx := range result.Transactions {
+			txMap[tx.Hash()] = tx
+		}
+
 		// Process blocks and receipts directly using the bridge package
-		if err := bridge.ProcessBlocks(result.Receipts, result.Header); err != nil {
-			log.Error("Failed to process block for bridge", "number", result.Header.Number, "err", err)
+		// Now passing both transactions and receipts
+		if err := bridge.ProcessBlocks(result.Receipts, result.Header, txMap); err != nil {
+			log.Error("Failed to process block for bridge",
+				"number", result.Header.Number,
+				"err", err)
 		}
 	}
 
